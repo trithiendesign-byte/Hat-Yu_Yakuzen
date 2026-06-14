@@ -1,0 +1,264 @@
+import express from "express";
+import path from "path";
+import dotenv from "dotenv";
+import { GoogleGenAI, Type } from "@google/genai";
+import { createServer as createViteServer } from "vite";
+
+dotenv.config();
+
+// Reassure GEMINI_API_KEY exists fallback
+const apiKey = process.env.GEMINI_API_KEY || "";
+
+const ai = new GoogleGenAI({
+  apiKey: apiKey,
+  httpOptions: {
+    headers: {
+      "User-Agent": "aistudio-build",
+    },
+  },
+});
+
+const app = express();
+const PORT = 3000;
+
+app.use(express.json({ limit: "50mb" }));
+
+// Yakuzen Generator API
+app.post("/api/generate", async (req, res) => {
+  try {
+    const { dishName, frameRatio, promptCount, advanced } = req.body;
+
+    if (!dishName || dishName.trim() === "") {
+      return res.status(400).json({ error: "Tên món ăn là bắt buộc." });
+    }
+
+    if (!apiKey) {
+      return res.status(500).json({
+        error: "GEMINI_API_KEY chưa được cấu hình. Vui lòng thêm key trong thiết lập Secrets.",
+      });
+    }
+
+    const selectedRatio = frameRatio === "9:16" ? "9:16" : "16:9";
+    const countText = promptCount && promptCount >= 60 && promptCount <= 100 
+      ? `Generate exactly ${promptCount} prompts.` 
+      : "Determine an appropriate number of prompts between 70 and 90 depending on the complexity of the recipe.";
+
+    let advancedInstructions = "";
+    if (advanced) {
+      const { 
+        dishware, 
+        mainIngredients, 
+        cookingAction, 
+        handDominance, 
+        cookCostume, 
+        backgroundEnv, 
+        lightingTime,
+        vesselMain,
+        continuityEnv,
+        continuityLight,
+        vesselFinal
+      } = advanced;
+      const constraints: string[] = [];
+
+      if (dishware && dishware.mode === "custom" && dishware.value) {
+        constraints.push(`- Dishware/Food Containers: The prompts should specifically depict and focus on "${dishware.value}".`);
+      }
+      if (mainIngredients && mainIngredients.mode === "custom" && mainIngredients.value) {
+        constraints.push(`- Displayed Ingredients: Key visual focus on "${mainIngredients.value}" being laid out, chopped, or stewed.`);
+      }
+      if (cookingAction && cookingAction.mode === "custom" && cookingAction.value) {
+        constraints.push(`- Cooking Actions Featured: Emphasize the cooking action of "${cookingAction.value}" during the respective stages.`);
+      }
+      if (handDominance && handDominance.mode === "custom" && handDominance.value) {
+        constraints.push(`- Hand Movement Perspective: Align the first-person perspective to clearly correspond with a "${handDominance.value}" composition.`);
+      }
+      if (cookCostume && cookCostume.mode === "custom" && cookCostume.value) {
+        constraints.push(`- Chef / Cook Attire style: The sleeves visible in the first-person frame must be styled as "${cookCostume.value}".`);
+      }
+      if (backgroundEnv && backgroundEnv.mode === "custom" && backgroundEnv.value) {
+        constraints.push(`- Prep Table & Surrounding Surfaces: All desktop scenes must take place over "${backgroundEnv.value}".`);
+      }
+      if (lightingTime && lightingTime.mode === "custom" && lightingTime.value) {
+        constraints.push(`- Time of Day & Lighting: The lighting atmosphere across the entire set must reflect "${lightingTime.value}".`);
+      }
+
+      // Visual Continuity Lock inputs:
+      const vMain = (vesselMain && vesselMain.mode === "custom" && vesselMain.value) ? vesselMain.value : "auto-selected matching handcraft ceramic/wooden bowl";
+      const cEnv = (continuityEnv && continuityEnv.mode === "custom" && continuityEnv.value) ? continuityEnv.value : "consistent Japanese kitchen backdrop";
+      const cLight = (continuityLight && continuityLight.mode === "custom" && continuityLight.value) ? continuityLight.value : "auto-selected daylight window light source";
+      const vFinal = (vesselFinal && vesselFinal.mode === "custom" && vesselFinal.value) ? vesselFinal.value : "Same as the main vessel";
+
+      const continuityInstructions = `
+
+---VISUAL CONTINUITY LOCK INSTRUCTION---
+BẮT BUỘC tuân thủ cho toàn bộ 60-100 prompts:
+
+1. DỤNG CỤ CHÍNH (Main Vessel):
+   User đã chọn: ${vMain}
+   → PHẢI dùng CÙNG dụng cụ này trong TOÀN BỘ sequence
+   → Cảnh 1 (chuẩn bị): "...in a ${vMain}..."
+   → Cảnh 30 (nấu): "...the same ${vMain}, filled with..."
+   → Cảnh 60 (trình bày): "...beautiful ${vMain} filled with finished dish..."
+   → KHÔNG ĐƯỢC thay đổi sang dụng cụ khác
+
+2. BỐI CẢNH (Environment):
+   User đã chọn: ${cEnv}
+   → PHẢI giữ CÙNG một bối cảnh xuyên suốt
+   → Nếu chọn "Bếp Nhật truyền thống" hoặc bất kỳ bối cảnh nào khác → tất cả prompts đều ở bối cảnh này
+   → Không được jump sang ngoài trời, quán, hiện đại thiếu nhất quán
+   → Mô tả chi tiết bối cảnh ở cảnh 1, sau đó dùng "same space" ở cảnh 2+
+
+3. ÁNH SÁNG (Lighting):
+   User đã chọn: ${cLight}
+   → PHẢI dùng CÙNG một nguồn ánh sáng
+   → Nếu chọn "Sáng từ cửa sổ phía Đông" hoặc bất kỳ ánh sáng nào khác → mô tả cụ thể cài đặt tương đương:
+      "${cLight}, soft natural illumination"
+   → Lặp lại description này (hoặc variation của nó) trong tất cả các prompts
+   → KHÔNG bật đèn khác, KHÔNG đổi hướng sáng, KHÔNG chuyển sang buổi tối đột ngột
+
+4. BÁT CUỐI CÙNG (Final Vessel):
+   User đã chọn: ${vFinal}
+   → Nếu "Cùng như dụng cụ chính" (hoặc "Same as the main vessel") → cảnh cuối cùng PHẢI dùng CÙNG dụng cụ chính để tạo sự thống nhất hoàn hảo.
+   → Nếu "Khác" hoặc một bát đũa trình bày riêng biệt khác → chỉ thay đổi bát này ở cảnh cuối cùng (plating), không phải cảnh nấu.
+
+5. KIỂM TRA CONSISTENCY:
+   Sau khi sinh 60-100 prompts, QUÉT lại và đảm bảo:
+   ✓ Tất cả prompts dùng CÙNG Main Vessel (không có prompt nào lọt qua khác)
+   ✓ Tất cả prompts ở CÙNG environment (search "kitchen" hoặc "garden" consistency)
+   ✓ Tất cả prompts có mention [lightSource] hoặc equivalent (không có prompt nào bỏ qua ánh sáng)
+   ✓ Cảnh cuối dùng đúng finalVessel
+
+EXAMPLE OUTPUT STRUCTURE:
+Prompt 1 (chuẩn bị):
+"First-person POV hands arranging fresh ginseng slices on a wooden cutting board, beside a beautiful [mainVessel value] (earthy tone), set in [environment value], [lightSource value] streaming in, shallow depth of field, 4k, photorealistic..."
+
+Prompt 25 (nấu chính):
+"...simmering in the SAME [mainVessel value] (consistent style from scene 1), steam rising, same [environment value] background, same [lightSource value], hands visible adjusting heat..."
+
+Prompt 60 (trình bày):
+"...beautiful finished dish plated in the [finalVessel value] (continuing visual theme from entire sequence), on wooden table in same space, same [lightSource value], shallow DOF..."
+
+---END VISUAL CONTINUITY LOCK INSTRUCTION---
+`;
+
+      constraints.push(continuityInstructions);
+
+      if (constraints.length > 0) {
+        advancedInstructions = `\n\nCRITICAL CONSTRAINTS (Strictly apply these custom choices to all relevant visual prompts):
+${constraints.join("\n")}`;
+      }
+    }
+
+    const systemInstruction = `You are an expert Japanese chef specialized in Yakuzen (traditional medicinal cooking) and a professional content creator for the YouTube channel "薬膳キッチン (Yakuzen Kitchen)".
+Your task is to generate:
+1. A professional video script for YouTube (around 800-1200 Japanese characters, approx. 5-8 minutes long when read out loud in polite 丁寧語 Japanese), along with an accurate, warm, and natural Vietnamese translation.
+   - The Japanese script MUST be warm, polite, and engaging (like a friendly Japanese YouTuber), using friendly structures like "...なんです" or "...んですよね".
+   - The Japanese script MUST have the following structure:
+     - HOOK: 1-2 engaging sentences about the benefits, taste, or healing characteristics of the dish, using Japanese patterns like "...なんです" or "...んですよね".
+     - BODY: Detailed step-by-step instructions (ingredients, steps, dosage, or tips) and health benefits based on Yakuzen principles.
+     - OUTRO: MUST be EXACTLY this verbatim Japanese string (do not modify even a single character):
+       今日のレシピはいかがでしたか？作ってみたよ！という方は、ぜひコメントで教えてください。チャンネル登録と🔔通知をONにすると、毎週新しい薬膳レシピが届きます。では、次の動画でまたお会いしましょう。薬膳キッチンでした。体を大切に、またね！
+     - Provide the Vietnamese translation for Hook, Body, and Outro separately.
+2. An array of Image Prompts (continuous, plain English descriptions without numbers or stage headers).
+3. An array of Video Prompts (continuous, plain English descriptions without numbers or stage headers, corresponding 1-to-1 with the Image Prompts).
+
+Rules for the Prompts:
+- Prompt Volume: ${countText}
+- Stage distribution percentage (approximate but strictly followed):
+  - Intro / Ingredients: 15%
+  - Preparation: 20%
+  - Main cooking: 35%
+  - Presentation / Finished product: 20%
+  - Atmospheric Outro: 10%
+- Selected Setting: You must choose exactly ONE of the following 3 Japanese traditional settings randomly, and use it consistently across ALL prompts for the entire set:
+  Setting A: "Traditional Japanese home kitchen" (mặt gỗ nhẹ, tối giản, ánh sáng tự nhiên từ cửa sổ kiểu shoji, rau/gia vị xếp ngăn nắp, cảm giác nhẹ nhàng thanh khiết tuyệt đẹp, tối giản)
+  Setting B: "Japanese dining table setting" (bàn gỗ thấp hoặc khu tatami truyền thống, đồ gốm sứ Nhật Bản mộc mạc tối giản)
+  Setting C: "Japanese garden/veranda" (engawa nhìn ra vườn Nhật cổ kính với đèn đá lantern, tre xanh, cây cối rậm rạp, ánh sáng tự nhiên ngoài trời thanh bình)
+- POV/Camera View: Must be FIRST-PERSON CHEST/SHOULDER-LEVEL POV. The camera is virtually mounted at chest or shoulder level looking down at the table/counter. The cook's hands are clearly visible in the frame (hand-first POV), with all processes of preparation and cooking shot from this authentic perspective. The scenes should show tasks like preparing ingredients (hands cutting and chopping), pouring water, cooking in the pot, stirring, drizzling rich sauce, and final plating on a bowl—ALL captured from this first-person chest-level POV. The cook's hands must always be naturally visible in the frame without deliberate posing. Use varied camera framings (wide, medium, close-up on hands, soup, or pot) but always strictly maintain this immersive first-person chest/shoulder-level POV.
+- Frame Aspect Ratio: The requested frame ratio is ${selectedRatio}. Adjust visual descriptions to best suit this framing (${selectedRatio} horizontal landscape or vertical portrait composition).
+- Prohibited: Absolutely NO modern Western kitchens, cafes, restaurants, European decor, busy streets, or other non-Japanese traditional cultures. Only authentic Japanese traditional style.
+- Technical Suffix: Every single prompt (both image and video) MUST end with this exact string:
+  "cinematic lighting, soft natural window light, shallow depth of field, warm color palette of gold and deep green, 4k, photorealistic, slow gentle camera movement, no text, no words, no letters, no watermark, no subtitles"
+- Text Formatting: Write prompts in English. Do NOT include numbers, prefix dashes, or stage labels (like "## Stage 1") in the prompts. Each item must be a direct description ending with the technical suffix.${advancedInstructions}
+
+Please make sure you generate a rich, complete set of prompts. Keep them consistent in tone, flow, and background.`;
+
+    const modelName = "gemini-3.5-flash";
+
+    const response = await ai.models.generateContent({
+      model: modelName,
+      contents: `Hãy tạo Script và Prompt chi tiết cho món ăn thực dưỡng Yakuzen: "${dishName}". Yêu cầu định dạng JSON đúng chuẩn.`,
+      config: {
+        systemInstruction: systemInstruction,
+        temperature: 1.0,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            selectedSetting: { 
+              type: Type.STRING,
+              description: "Tên bối cảnh được chọn ngẫu nhiên trong 3 bối cảnh"
+            },
+            scriptJa: {
+              type: Type.OBJECT,
+              properties: {
+                hook: { type: Type.STRING },
+                body: { type: Type.STRING },
+                outro: { type: Type.STRING }
+              },
+              required: ["hook", "body", "outro"]
+            },
+            scriptVi: {
+              type: Type.OBJECT,
+              properties: {
+                hook: { type: Type.STRING },
+                body: { type: Type.STRING },
+                outro: { type: Type.STRING }
+              },
+              required: ["hook", "body", "outro"]
+            },
+            imagePrompts: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            },
+            videoPrompts: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          },
+          required: ["selectedSetting", "scriptJa", "scriptVi", "imagePrompts", "videoPrompts"]
+        }
+      }
+    });
+
+    const parsedData = JSON.parse(response.text || "{}");
+    return res.json(parsedData);
+
+  } catch (error: any) {
+    console.error("Lỗi trong backend API:", error);
+    return res.status(500).json({ error: error.message || "Có lỗi. Vui lòng thử lại." });
+  }
+});
+
+// Setup Vite or Static File Server
+async function startServer() {
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+startServer();
